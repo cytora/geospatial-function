@@ -1,0 +1,38 @@
+spec:
+  lambdas:
+    - functionName: http
+      functionSpec:
+        handler: bin/http
+        runtime: go1.x
+        policies:
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+          - "arn:aws:iam::897727315233:policy/RDSConnectReadPolicy"
+        vpc:
+          "cytora-dev": 
+            id: vpc-08eebb59436406fbf
+            sg: 
+              - sg-063e6e5a208055fc0
+            subnets:
+              - subnet-0df4c5736d11a5c28
+              - subnet-0218c45c63d5f2d19
+              - subnet-032c66b8153ea8d25
+        environmentVariables:
+          - name: RDS_DB_NAME
+            value: "cytora_data_rds"
+          - name: RDS_PROXY_ENDPOINT
+            value: "dev-postgres-11-proxy-read.proxy-c5xohzyav5el.eu-west-1.rds.amazonaws.com:5432"
+          - name: RDS_PROXY_USER
+            value: "DevRdsRead"
+      resourceConfig:
+        timeout: 300
+        memorySize: 128
+      event:
+        http:
+          path: /{proxy+}
+          method: ANY
+          enabled: true
+  environments:
+    - name: cytora-dev
+      trigger: true
+    - name: cytora-prod
+      dependsOn: cytora-dev
