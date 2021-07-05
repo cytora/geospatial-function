@@ -1,0 +1,4 @@
+#apig-wsgi==2.11.0
+#boto3
+fastapi
+psycopg2-binary
