@@ -1,267 +1,41 @@
 version: 2.1
 
 orbs:
-  aws-assume: airswap/assume-role@0.2.0
-  aws-s3: circleci/aws-s3@1.0.13
-  # aws-ecr: circleci/aws-ecr@6.5.0
-  terraform: circleci/terraform@2.0.2
-
-executors:
-  python-builder:
-    docker:
-      - image: eu.gcr.io/${GCP_PROJECT}/python-builder-lambda:latest
-        auth:
-          username: _json_key
-          password: ${GCLOUD_SERVICE_KEY}
-  aws-cli:
-    docker:
-      - image: eu.gcr.io/${GCP_PROJECT}/go-protobuf-builder:latest
-        auth:
-          username: _json_key
-          password: ${GCLOUD_SERVICE_KEY}
-
-jobs:
-  build-function:
-    executor: python-builder
-    steps:
-      - checkout
-
-      - restore_cache:
-          keys:
-            - go-modules-v1-{{ checksum "go.sum" }}
-            # See https://circleci.com/docs/2.0/caching/#restoring-cache
-            - go-modules-v1-
-
-      - setup_remote_docker
-
-      - run:
-          name: authenticate to google
-          command: |
-            echo $GCLOUD_SERVICE_KEY | gcloud auth activate-service-account --key-file=-
-            gcloud --quiet config set project ${GCP_PROJECT}
-            gcloud auth configure-docker
-      - run:
-          name: build function
-          command: |
-            make
-            echo "pwd: $(pwd)"
-            mkdir -v workspace
-
-            echo "${CIRCLE_BUILD_NUM}" > workspace/version
-
-            echo "hello pipeline"
-
-#            cp dist.zip workspace/dist.zip
-
-#            cp dist.zip ${SERVICE}-src-0.0.${CIRCLE_BUILD_NUM}.zip
-#            gsutil cp ${SERVICE}-src-0.0.${CIRCLE_BUILD_NUM}.zip gs://cytora-service-versions/${SERVICE}/
-
-      - save_cache:
-          key: go-modules-v1-{{ checksum "go.sum" }}
-          paths:
-            - /root/go/pkg/mod
-
-      - persist_to_workspace:
-          root: workspace
-          paths:
-            - dist.zip
-            - version
-
-  aws-publish:
-    docker:
-      - image: eu.gcr.io/core-platform-1/awscli:latest
-        auth:
-          username: _json_key
-          password: ${GCLOUD_SERVICE_KEY}
-
-    steps:
-      - attach_workspace:
-          at: /tmp/workspace
-
-      - aws-assume/assume-role:
-          role-name: "CytoraCircleciAccess"
-          account-id: "615147210125"
-
-      - aws-s3/copy:
-          from: /tmp/workspace/dist.zip
-          to: "s3://cytora-platform-eu-west-1-service-versions/${SERVICE}/${SERVICE}-$(cat /tmp/workspace/version).zip"
-          aws-region: AWS_REGION
-
-  build-infra-dev:
-    docker:
-      - image: eu.gcr.io/core-platform-1/terraform-runtime:latest
-        auth:
-          username: _json_key
-          password: ${GCLOUD_SERVICE_KEY}
-
-    steps:
-      - attach_workspace:
-          at: /tmp/workspace
-      - checkout
-
-      - aws-assume/assume-role:
-          role-name: "CytoraCircleciAccess"
-          account-id: "615147210125"
-
-      - run:
-          name: make dirs & get latest files
-          command: |
-            mkdir terraform-service-templates
-            mkdir terraform-modules
-            SERVICE_TEMPLATE_KEY=$(aws s3 ls cytora-platform-eu-west-1-terraform-service-templates-versions --recursive | sort | tail -n 1 | awk '{print $4}')
-            echo "export SERVICE_TEMPLATE_KEY=$SERVICE_TEMPLATE_KEY" >> $BASH_ENV
-            TERRAFORM_MODULES_KEY=$(aws s3 ls cytora-platform-eu-west-1-terraform-modules-versions --recursive | sort | tail -n 1 | awk '{print $4}')
-            echo "export TERRAFORM_MODULES_KEY=$TERRAFORM_MODULES_KEY" >> $BASH_ENV
-
-      - run:
-          name: get build version
-          command: |
-            echo "export VERSION_NUMBER=$(cat /tmp/workspace/version)" >> $BASH_ENV
-
-      - aws-s3/copy:
-          from: "s3://cytora-platform-eu-west-1-terraform-service-templates-versions/${SERVICE_TEMPLATE_KEY}"
-          to: ./terraform-service-templates
-          aws-region: AWS_REGION
-
-      - run:
-          name: unzip terraform templates
-          command: |
-            cd terraform-service-templates
-            tar -xvf ${SERVICE_TEMPLATE_KEY}
-
-      - aws-s3/copy:
-          from: "s3://cytora-platform-eu-west-1-terraform-modules-versions/${TERRAFORM_MODULES_KEY}"
-          to: ./terraform-modules
-          aws-region: AWS_REGION
-
-      - run:
-          name: unzip terraform modules
-          command: |
-            cd terraform-modules
-            tar -xvf ${TERRAFORM_MODULES_KEY}
-
-      - aws-assume/assume-role:
-          role-name: "CytoraCircleciAccess"
-          account-id: "897727315233"
-
-      - terraform/init:
-          backend: true
-          backend_config_file: /terraform-service-templates/services/${SERVICE}/function-http/init.tfvars
-
-      - terraform/plan:
-          backend_config_file: init.tfvars
-          backend_config: bucket="cytora-dev-terraform-eu-west-1",dynamodb_table="cytora-dev-terraform-state-lock"
-          path: terraform-service-templates/services/${SERVICE}/function-http
-          var_file: terraform.tfvars,common.tfvars
-          var: service=${SERVICE},region=${AWS_REGION},version_number=${VERSION_NUMBER},environment="cytora-dev"
-          workspace: ${SERVICE}-function-http
-
-      - terraform/apply:
-          backend_config_file: init.tfvars
-          backend_config: bucket="cytora-dev-terraform-eu-west-1",dynamodb_table="cytora-dev-terraform-state-lock"
-          path: terraform-service-templates/services/${SERVICE}/function-http
-          var_file: terraform.tfvars,common.tfvars
-          var: service=${SERVICE},region=${AWS_REGION},version_number=${VERSION_NUMBER},environment="cytora-dev"
-          workspace: ${SERVICE}-function-http
-
-  build-infra-prod:
-    docker:
-      - image: eu.gcr.io/core-platform-1/terraform-runtime:latest
-        auth:
-          username: _json_key
-          password: ${GCLOUD_SERVICE_KEY}
-
-    steps:
-      - attach_workspace:
-          at: /tmp/workspace
-      - checkout
-
-      - aws-assume/assume-role:
-          role-name: "CytoraCircleciAccess"
-          account-id: "615147210125"
-
-      - run:
-          name: make dirs & get latest files
-          command: |
-            mkdir terraform-service-templates
-            mkdir terraform-modules
-            SERVICE_TEMPLATE_KEY=$(aws s3 ls cytora-platform-eu-west-1-terraform-service-templates-versions --recursive | sort | tail -n 1 | awk '{print $4}')
-            echo "export SERVICE_TEMPLATE_KEY=$SERVICE_TEMPLATE_KEY" >> $BASH_ENV
-            TERRAFORM_MODULES_KEY=$(aws s3 ls cytora-platform-eu-west-1-terraform-modules-versions --recursive | sort | tail -n 1 | awk '{print $4}')
-            echo "export TERRAFORM_MODULES_KEY=$TERRAFORM_MODULES_KEY" >> $BASH_ENV
-
-      - aws-s3/copy:
-          from: "s3://cytora-platform-eu-west-1-terraform-service-templates-versions/${SERVICE_TEMPLATE_KEY}"
-          to: ./terraform-service-templates
-          aws-region: AWS_REGION
-
-      - run:
-          name: unzip terraform templates
-          command: |
-            cd terraform-service-templates
-            tar -xvf ${SERVICE_TEMPLATE_KEY}
-
-      - aws-s3/copy:
-          from: "s3://cytora-platform-eu-west-1-terraform-modules-versions/${TERRAFORM_MODULES_KEY}"
-          to: ./terraform-modules
-          aws-region: AWS_REGION
-
-      - run:
-          name: unzip terraform modules
-          command: |
-            cd terraform-modules
-            tar -xvf ${TERRAFORM_MODULES_KEY}
-
-      - aws-assume/assume-role:
-          role-name: "CytoraCircleciAccess"
-          account-id: "663015356758"
-
-      - terraform/init:
-          backend: true
-          backend_config_file: /terraform-service-templates/services/${SERVICE}/function-http/init.tfvars
-
-      - terraform/plan:
-          backend_config_file: init.tfvars
-          backend_config: bucket="cytora-prod-terraform-eu-west-1",dynamodb_table="cytora-prod-terraform-state-lock"
-          path: terraform-service-templates/services/${SERVICE}/function-http
-          var_file: terraform.tfvars,common.tfvars
-          var: service=${SERVICE},region=${AWS_REGION},version_number=${CIRCLE_TAG},environment="cytora-prod"
-          workspace: ${SERVICE}-function-http
-
-      - terraform/apply:
-          backend_config_file: init.tfvars
-          backend_config: bucket="cytora-prod-terraform-eu-west-1",dynamodb_table="cytora-prod-terraform-state-lock"
-          path: terraform-service-templates/services/${SERVICE}/function-http
-          var_file: terraform.tfvars,common.tfvars
-          var: service=${SERVICE},region=${AWS_REGION},version_number=${CIRCLE_TAG},environment="cytora-prod"
-          workspace: ${SERVICE}-function-http
+  # The python orb contains a set of prepackaged CircleCI configuration you can use repeatedly in your configuration files
+  # Orb commands and jobs help you with common scripting around a language/tool
+  # so you dont have to copy and paste it everywhere.
+  # See the orb documentation here: https://circleci.com/developer/orbs/orb/circleci/python
+  python: circleci/python@1.2
 
 workflows:
-  version: 2
-  build_and_push:
+  sample:  # This is the name of the workflow, feel free to change it to better match your workflow.
+    # Inside the workflow, you define the jobs you want to run. 
+    # For more details on extending your workflow, see the configuration docs: https://circleci.com/docs/2.0/configuration-reference/#workflows 
     jobs:
-      - build-function:
-          filters:
-            branches:
-              only:
-                - master
-      - aws-publish:
-          requires:
-            - build-function
-          filters:
-            branches:
-              only:
-                - master
-      - build-infra-dev:
-          requires:
-            - aws-publish
-          filters:
-            branches:
-              only:
-                - master
-      - build-infra-prod:
-          filters:
-            tags:
-              only: /^*.*/
-            branches:
-              ignore: /.*/
+      - build-and-test
+
+
+jobs:
+  build-and-test:  # This is the name of the job, feel free to change it to better match what you're trying to do!
+    # These next lines defines a Docker executors: https://circleci.com/docs/2.0/executor-types/
+    # You can specify an image from Dockerhub or use one of the convenience images from CircleCI's Developer Hub
+    # A list of available CircleCI Docker convenience images are available here: https://circleci.com/developer/images/image/cimg/python
+    # The executor is the environment in which the steps below will be executed - below will use a python 3.9 container
+    # Change the version below to your required version of python
+    docker:
+      - image: cimg/python:3.8
+    # Checkout the code as the first step. This is a dedicated CircleCI step.
+    # The python orb's install-packages step will install the dependencies from a Pipfile via Pipenv by default.
+    # Here we're making sure we use just use the system-wide pip. By default it uses the project root's requirements.txt.
+    # Then run your tests!
+    # CircleCI will report the results back to your VCS provider.
+    steps:
+      - checkout
+      - python/install-packages:
+          pkg-manager: pip
+          # app-dir: ~/project/package-directory/  # If you're requirements.txt isn't in the root directory.
+          # pip-dependency-file: test-requirements.txt  # if you have a different name for your requirements file, maybe one that combines your runtime and test requirements.
+      - run:
+          name: Run tests
+          # This assumes pytest is installed via the install-package step above
+          command: pytest
