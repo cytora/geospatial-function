@@ -29,7 +29,7 @@ jobs:
       - restore_cache:
           keys:
             - go-modules-v1-{{ checksum "go.sum" }}
-            # See https://circleci.com/docs/2.0/caching/#restoring-cache
+            #  See https://circleci.com/docs/2.0/caching/#restoring-cache
             - go-modules-v1-
 
       - setup_remote_docker
