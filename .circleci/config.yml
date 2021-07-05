@@ -44,9 +44,12 @@ jobs:
           command: |
             make
             echo "pwd: $(pwd)"
-          # mkdir -v workspace
-          # cp dist.zip workspace/dist.zip
+            mkdir -v workspace
+
             echo "${CIRCLE_BUILD_NUM}" > workspace/version
+
+#            cp dist.zip workspace/dist.zip
+
 #            cp dist.zip ${SERVICE}-src-0.0.${CIRCLE_BUILD_NUM}.zip
 #            gsutil cp ${SERVICE}-src-0.0.${CIRCLE_BUILD_NUM}.zip gs://cytora-service-versions/${SERVICE}/
 
