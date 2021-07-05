@@ -1,3 +1,6 @@
+.excl/
+.creds.creds
+
 key.json
 private.key
 venv3/
