@@ -49,6 +49,8 @@ jobs:
 
             echo "${CIRCLE_BUILD_NUM}" > workspace/version
 
+            echo "hello pipeline"
+
 #            cp dist.zip workspace/dist.zip
 
 #            cp dist.zip ${SERVICE}-src-0.0.${CIRCLE_BUILD_NUM}.zip
