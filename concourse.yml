@@ -1,0 +1,618 @@
+
+resource_types:
+  - name: slack-notification
+    type: docker-image
+    source:
+      repository: cfcommunity/slack-notification-resource
+      tag: latest
+  - name: gcs-resource
+    type: docker-image
+    source:
+      repository: frodenas/gcs-resource
+resources:
+  - name: concourse-bi-integration
+    type: docker-image
+    source:
+      repository: eu.gcr.io/core-platform-1/concourse-files
+      tag: latest
+      username: _json_key
+      password: ((GCS_AUTH_JSON_cytora-platform))
+  - name: cloudformation-templates
+    type: docker-image
+    source:
+      repository: eu.gcr.io/core-platform-1/cloudformation-templates
+      tag: latest
+      username: _json_key
+      password: ((GCS_AUTH_JSON_cytora-platform))
+  - name: slack-alert-cytora-dev
+    type: slack-notification
+    source:
+      url: https://hooks.slack.com/services/((SLACK_ID-cytora-dev))
+  - name: slack-alert-cytora-prod
+    type: slack-notification
+    source:
+      url: https://hooks.slack.com/services/((SLACK_ID-cytora-prod))
+  - name: service-version
+    type: gcs-resource
+    source:
+      bucket: cytora-service-versions
+      json_key: ((GCS_AUTH_JSON_cytora-platform))
+      regexp: ((SERVICE))/((SERVICE))-src-0.0.(.*).zip
+  - name: deploy-scripts
+    type: gcs-resource
+    source:
+      bucket: cytora-core-platform
+      json_key: ((GCS_AUTH_JSON_cytora-platform))
+      regexp: deploy-script-builds/deploy-scripts-(.*).tar
+jobs:
+- name: start-deploy-cytora-dev
+  on_success:
+    do:
+      - task: publish-bi-metrics
+        image: concourse-bi-integration
+        file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+        params:
+          GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+          PROJECT_ID: core-platform-1
+          STEP_NAME: start-deploy
+          SERVICE: ((SERVICE))
+          ENV: cytora-dev
+          SUCCEEDED: true
+  on_failure:
+    do:
+      - task: publish-bi-metrics
+        image: concourse-bi-integration
+        file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+        params:
+          GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+          PROJECT_ID: core-platform-1
+          STEP_NAME: start-deploy
+          SERVICE: ((SERVICE))
+          ENV: cytora-dev
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: deploy-scripts
+            params:
+              unpack: true
+          - get: service-version
+            trigger: true
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - task: publish-bi-metrics
+            image: concourse-bi-integration
+            file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+            params:
+              GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+              PROJECT_ID: core-platform-1
+              STEP_NAME: start-deploy
+              SERVICE: ((SERVICE))
+              ENV: cytora-dev
+              SUCCEEDED: true
+              STEP_FLAG: START
+          - put: slack-alert-cytora-dev
+            params:
+              text_file: service-version/version
+              text: |
+                  :mantelpiece_clock: Deploying ((SERVICE)) version $TEXT_FILE_CONTENT on cytora-dev
+- name: deploy-lambda-cytora-dev
+  serial: true
+  on_success:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-dev
+            SUCCEEDED: true
+        - put: slack-alert-cytora-dev
+          params:
+            text_file: service-version/version
+            text: |
+              :white_check_mark: Deployed *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-dev successfully! :excited_jose:
+  on_failure:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-dev
+            SUCCEEDED: false
+        - put: slack-alert-cytora-dev
+          params:
+            text_file: service-version/version
+            text: |
+              :X: Failed to deploy files for *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-dev
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: cloudformation-templates
+          - get: service-version
+            params:
+              unpack: true
+            trigger: true
+            passed: [start-deploy-cytora-dev]
+          - get: deploy-scripts
+            params:
+              unpack: true
+    - do:
+      - task: publish-bi-metrics
+        image: concourse-bi-integration
+        file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+        params:
+          GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+          PROJECT_ID: core-platform-1
+          STEP_NAME: deploy
+          SERVICE: ((SERVICE))
+          ENV: cytora-dev
+          SUCCEEDED: true
+          STEP_FLAG: START
+      - task: deploy-function-cytora-dev
+        image: cloudformation-templates
+        file: deploy-scripts/cloudformation-resources/tasks/create-lambda-function.yml
+        params:
+          ENV: cytora-dev
+          AWS_REGION: eu-west-1
+          CONCOURSE_VAULT_ROLE_ID: ((CONCOURSE_VAULT_ROLE_ID_cytora-dev))
+          CONCOURSE_VAULT_SECRET_ID: ((CONCOURSE_VAULT_SECRET_ID_cytora-dev))
+          SERVICE: ((SERVICE))
+          GATEWAY_SPEC: |-
+            authSpec:
+              function:
+                authHeader: ""
+                authTTL: 0
+                authType: ""
+                disabled: false
+              ipWhitelist:
+                enabled: false
+                ips: []
+          STACK: |-
+            - functionSpec:
+                functionName: http
+                handler: bin/http
+                memorySize: 128
+                runtime: go1.x
+                timeout: 300
+                maxParallelInstances: 5
+                splitCode: false
+                policies:
+                  - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+                  - arn:aws:iam::897727315233:policy/RDSConnectReadPolicy
+                vpc:
+                  cytora-dev:
+                    sg:                  
+                      - sg-063e6e5a208055fc0
+                    subnets:
+                      - subnet-0df4c5736d11a5c28
+                      - subnet-0218c45c63d5f2d19
+                      - subnet-032c66b8153ea8d25
+                envVars:
+                  RDS_DB_NAME: cytora_data_rds
+                  RDS_PROXY_ENDPOINT: dev-postgres-11-proxy-read.proxy-c5xohzyav5el.eu-west-1.rds.amazonaws.com:5432
+                  RDS_PROXY_USER: DevRdsRead
+              triggerType: http
+              triggerSpec:
+                enabled: true
+                method: ANY
+                path: /{proxy+}
+      - task: add-base-path-mapping-cytora-dev
+        image: cloudformation-templates
+        file: deploy-scripts/cloudformation-resources/tasks/create-base-path-mapping.yml
+        params:
+          ENV: cytora-dev
+          AWS_REGION: eu-west-1
+          CONCOURSE_VAULT_ROLE_ID: ((CONCOURSE_VAULT_ROLE_ID_cytora-dev))
+          CONCOURSE_VAULT_SECRET_ID: ((CONCOURSE_VAULT_SECRET_ID_cytora-dev))
+          SERVICE: ((SERVICE))
+- name: cleanup-lambda-cytora-dev
+  serial: true
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: cloudformation-templates
+          - get: service-version
+            params:
+              unpack: true
+            trigger: true
+            passed: [deploy-lambda-cytora-dev]
+          - get: deploy-scripts
+            params:
+              unpack: true
+    - do:
+      - task: delete-stack
+        image: cloudformation-templates
+        file: deploy-scripts/cloudformation-resources/tasks/cleanup-lambda.yml
+        params:
+          ENV: cytora-dev
+          AWS_REGION: eu-west-1
+          CONCOURSE_VAULT_ROLE_ID: ((CONCOURSE_VAULT_ROLE_ID_cytora-dev))
+          CONCOURSE_VAULT_SECRET_ID: ((CONCOURSE_VAULT_SECRET_ID_cytora-dev))
+          SERVICE: ((SERVICE))
+- name: finish-deploy-cytora-dev
+  on_success:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: finish-deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-dev
+            SUCCEEDED: true
+        - put: slack-alert-cytora-dev
+          params:
+            text_file: service-version/version
+            text: |
+              :white_check_mark: Deployed *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-dev successfully! :excited_jose:
+  on_failure:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: finish-deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-dev
+            SUCCEEDED: false
+        - put: slack-alert-cytora-dev
+          params:
+            text_file: service-version/version
+            text: |
+              :X: Failed to deploy files for *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-dev
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: deploy-scripts
+            params:
+              unpack: true
+          - get: service-version
+            trigger: true
+            params:
+              unpack: true
+            passed: [deploy-lambda-cytora-dev]
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - task: publish-bi-metrics
+            image: concourse-bi-integration
+            file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+            params:
+              GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+              PROJECT_ID: core-platform-1
+              STEP_NAME: finish-deploy
+              SERVICE: ((SERVICE))
+              ENV: cytora-dev
+              SUCCEEDED: true
+              STEP_FLAG: START
+          - put: slack-alert-cytora-dev
+            params:
+              text_file: service-version/version
+              text: |
+                  :white_check_mark: Finished deploying *((SERVICE))*:$TEXT_FILE_CONTENT on cytora-dev :tada: :confetti_ball:
+- name: start-deploy-cytora-prod
+  on_success:
+    do:
+      - task: publish-bi-metrics
+        image: concourse-bi-integration
+        file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+        params:
+          GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+          PROJECT_ID: core-platform-1
+          STEP_NAME: start-deploy
+          SERVICE: ((SERVICE))
+          ENV: cytora-prod
+          SUCCEEDED: true
+  on_failure:
+    do:
+      - task: publish-bi-metrics
+        image: concourse-bi-integration
+        file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+        params:
+          GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+          PROJECT_ID: core-platform-1
+          STEP_NAME: start-deploy
+          SERVICE: ((SERVICE))
+          ENV: cytora-prod
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: deploy-scripts
+            params:
+              unpack: true
+          - get: service-version
+            trigger: false
+            passed: [finish-deploy-cytora-dev]
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - task: publish-bi-metrics
+            image: concourse-bi-integration
+            file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+            params:
+              GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+              PROJECT_ID: core-platform-1
+              STEP_NAME: start-deploy
+              SERVICE: ((SERVICE))
+              ENV: cytora-prod
+              SUCCEEDED: true
+              STEP_FLAG: START
+          - put: slack-alert-cytora-prod
+            params:
+              text_file: service-version/version
+              text: |
+                  :mantelpiece_clock: Deploying ((SERVICE)) version $TEXT_FILE_CONTENT on cytora-prod
+- name: deploy-lambda-cytora-prod
+  serial: true
+  on_success:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-prod
+            SUCCEEDED: true
+        - put: slack-alert-cytora-prod
+          params:
+            text_file: service-version/version
+            text: |
+              :white_check_mark: Deployed *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-prod successfully! :excited_jose:
+  on_failure:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-prod
+            SUCCEEDED: false
+        - put: slack-alert-cytora-prod
+          params:
+            text_file: service-version/version
+            text: |
+              :X: Failed to deploy files for *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-prod
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: cloudformation-templates
+          - get: service-version
+            params:
+              unpack: true
+            trigger: true
+            passed: [start-deploy-cytora-prod]
+          - get: deploy-scripts
+            params:
+              unpack: true
+    - do:
+      - task: publish-bi-metrics
+        image: concourse-bi-integration
+        file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+        params:
+          GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+          PROJECT_ID: core-platform-1
+          STEP_NAME: deploy
+          SERVICE: ((SERVICE))
+          ENV: cytora-prod
+          SUCCEEDED: true
+          STEP_FLAG: START
+      - task: deploy-function-cytora-prod
+        image: cloudformation-templates
+        file: deploy-scripts/cloudformation-resources/tasks/create-lambda-function.yml
+        params:
+          ENV: cytora-prod
+          AWS_REGION: eu-west-1
+          CONCOURSE_VAULT_ROLE_ID: ((CONCOURSE_VAULT_ROLE_ID_cytora-prod))
+          CONCOURSE_VAULT_SECRET_ID: ((CONCOURSE_VAULT_SECRET_ID_cytora-prod))
+          SERVICE: ((SERVICE))
+          GATEWAY_SPEC: |-
+            authSpec:
+              function:
+                authHeader: ""
+                authTTL: 0
+                authType: ""
+                disabled: false
+              ipWhitelist:
+                enabled: false
+                ips: []
+          STACK: |-
+            - functionSpec:
+                functionName: http
+                handler: bin/http
+                memorySize: 128
+                runtime: go1.x
+                timeout: 300
+                maxParallelInstances: 5
+                splitCode: false
+                policies:
+                  - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+                  - arn:aws:iam::897727315233:policy/RDSConnectReadPolicy
+                vpc:
+                  cytora-dev:
+                    sg:                  
+                      - sg-063e6e5a208055fc0
+                    subnets:
+                      - subnet-0df4c5736d11a5c28
+                      - subnet-0218c45c63d5f2d19
+                      - subnet-032c66b8153ea8d25
+                envVars:
+                  RDS_DB_NAME: cytora_data_rds
+                  RDS_PROXY_ENDPOINT: dev-postgres-11-proxy-read.proxy-c5xohzyav5el.eu-west-1.rds.amazonaws.com:5432
+                  RDS_PROXY_USER: DevRdsRead
+              triggerType: http
+              triggerSpec:
+                enabled: true
+                method: ANY
+                path: /{proxy+}
+      - task: add-base-path-mapping-cytora-prod
+        image: cloudformation-templates
+        file: deploy-scripts/cloudformation-resources/tasks/create-base-path-mapping.yml
+        params:
+          ENV: cytora-prod
+          AWS_REGION: eu-west-1
+          CONCOURSE_VAULT_ROLE_ID: ((CONCOURSE_VAULT_ROLE_ID_cytora-prod))
+          CONCOURSE_VAULT_SECRET_ID: ((CONCOURSE_VAULT_SECRET_ID_cytora-prod))
+          SERVICE: ((SERVICE))
+- name: cleanup-lambda-cytora-prod
+  serial: true
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: cloudformation-templates
+          - get: service-version
+            params:
+              unpack: true
+            trigger: true
+            passed: [deploy-lambda-cytora-prod]
+          - get: deploy-scripts
+            params:
+              unpack: true
+    - do:
+      - task: delete-stack
+        image: cloudformation-templates
+        file: deploy-scripts/cloudformation-resources/tasks/cleanup-lambda.yml
+        params:
+          ENV: cytora-prod
+          AWS_REGION: eu-west-1
+          CONCOURSE_VAULT_ROLE_ID: ((CONCOURSE_VAULT_ROLE_ID_cytora-prod))
+          CONCOURSE_VAULT_SECRET_ID: ((CONCOURSE_VAULT_SECRET_ID_cytora-prod))
+          SERVICE: ((SERVICE))
+- name: finish-deploy-cytora-prod
+  on_success:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: finish-deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-prod
+            SUCCEEDED: true
+        - put: slack-alert-cytora-prod
+          params:
+            text_file: service-version/version
+            text: |
+              :white_check_mark: Deployed *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-prod successfully! :excited_jose:
+  on_failure:
+    in_parallel:
+      fail_fast: true
+      steps:
+        - task: publish-bi-metrics
+          image: concourse-bi-integration
+          file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+          params:
+            GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+            PROJECT_ID: core-platform-1
+            STEP_NAME: finish-deploy
+            SERVICE: ((SERVICE))
+            ENV: cytora-prod
+            SUCCEEDED: false
+        - put: slack-alert-cytora-prod
+          params:
+            text_file: service-version/version
+            text: |
+              :X: Failed to deploy files for *((SERVICE))*:$TEXT_FILE_CONTENT in cytora-prod
+  plan:
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - get: concourse-bi-integration
+          - get: deploy-scripts
+            params:
+              unpack: true
+          - get: service-version
+            trigger: true
+            params:
+              unpack: true
+            passed: [deploy-lambda-cytora-prod]
+    - in_parallel:
+        fail_fast: true
+        steps:
+          - task: publish-bi-metrics
+            image: concourse-bi-integration
+            file: deploy-scripts/concourse-ci/tasks/publish-bi-metrics.yml
+            params:
+              GCS_AUTH_JSON: ((GCS_AUTH_JSON_cytora-platform))
+              PROJECT_ID: core-platform-1
+              STEP_NAME: finish-deploy
+              SERVICE: ((SERVICE))
+              ENV: cytora-prod
+              SUCCEEDED: true
+              STEP_FLAG: START
+          - put: slack-alert-cytora-prod
+            params:
+              text_file: service-version/version
+              text: |
+                  :white_check_mark: Finished deploying *((SERVICE))*:$TEXT_FILE_CONTENT on cytora-prod :tada: :confetti_ball:
+groups:
+    - name: ((SERVICE))
+      jobs:
+        - start-deploy-cytora-dev
+        - deploy-lambda-cytora-dev
+        - cleanup-lambda-cytora-dev
+        - finish-deploy-cytora-dev
+        - start-deploy-cytora-prod
+        - deploy-lambda-cytora-prod
+        - cleanup-lambda-cytora-prod
+        - finish-deploy-cytora-prod
+    - name: cytora-dev
+      jobs:
+        - start-deploy-cytora-dev
+        - deploy-lambda-cytora-dev
+        - cleanup-lambda-cytora-dev
+        - finish-deploy-cytora-dev
+    - name: cytora-prod
+      jobs:
+        - start-deploy-cytora-prod
+        - deploy-lambda-cytora-prod
+        - cleanup-lambda-cytora-prod
+        - finish-deploy-cytora-prod
+
